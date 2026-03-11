@@ -68,6 +68,9 @@ class TransferFunctionWidget(QWidget):
         # 이제 모든 Y 좌표 계산은 110px 위로 당겨진 효과를 가집니다.
         self.setMouseTracking(True)
 
+        # TF 변경위치 하이라이트
+        self.highlight_range = None   # (low, high) in [0,1]
+
         
     def set_volume_data(self, volume_data):
         """볼륨 데이터 설정 및 히스토그램 계산 (균등화 개선)"""
@@ -184,6 +187,8 @@ class TransferFunctionWidget(QWidget):
         self.draw_tf_area_histogram(painter)
         self.draw_enhanced_grid(painter)
 
+        # 3.a TF 변경 위치 하이라이트 그리기
+        self.draw_roi_highlight(painter)
         
         # 4. TF 곡선 그리기 (히스토그램 위에 겹쳐짐)
         self.draw_enhanced_tf_curve(painter)
@@ -576,3 +581,37 @@ class TransferFunctionWidget(QWidget):
             lut[i] = alpha
         
         return lut
+
+    def set_highlight_range(self, value):
+        """
+        value: (low, high) in [0,1]
+        """
+        if value is None:
+            self.highlight_range = None
+        else:
+            low, high = value
+            low = max(0.0, min(1.0, float(low)))
+            high = max(0.0, min(1.0, float(high)))
+            self.highlight_range = (min(low, high), max(low, high))
+        self.update()
+
+    def clear_highlight_range(self):
+        self.highlight_range = None
+        self.update()
+
+    def draw_roi_highlight(self, painter):
+        if self.highlight_range is None:
+            return
+
+        low, high = self.highlight_range
+
+        x0 = int(low * (self.width() - 1))
+        x1 = int(high * (self.width() - 1))
+
+        width = max(1, x1 - x0)
+
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 230, 80, 70))  # 연노랑 반투명
+        painter.drawRect(x0, self.tf_area_top, width, self.tf_area_height)
+        painter.restore()

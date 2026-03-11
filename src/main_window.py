@@ -18,11 +18,15 @@ from src.gui.panel.file_panel import FilePanel
 from src.gui.panel.tf_panel import TransferFunctionPanel
 from src.gui.panel.rendering_panel import RenderingPanel
 from src.gui.panel.optimization_panel import OptimizationPanel
+
 from src.core.support_sam import SAMService
 from src.core.feature_analyzer import FeatureAnalyzer
 from src.core.tf_optimizer import TFOptimizer
 from src.core.support_optimization import OptimizationWorker
 from src.core.utils.tf_utils import find_target_range_from_tents
+
+from src.core.roi_feature_extractor import ROIFeatureExtractor
+from src.core.wysiwyg_tf_editor import WysiwygTFEditor
 
 class VolumeRenderingMainWindow(QMainWindow):
     """간결화된 메인 윈도우 - Standard 렌더링 및 SAM 최적화 지원"""
@@ -44,6 +48,10 @@ class VolumeRenderingMainWindow(QMainWindow):
         self.sam_model.text_predicted.connect(self.on_text_mask)  # [NEW] 텍스트 SAM 결과 연결
         self.sam_model.error.connect(self.on_sam_error)
         self.sam_model.load_async()
+
+        self.roi_feature_extractor = None
+        self.current_roi_info = None
+        self.wysiwyg_tf_editor = WysiwygTFEditor()
 
         self.init_ui()
         self.create_panels()
@@ -376,7 +384,7 @@ class VolumeRenderingMainWindow(QMainWindow):
                 
                 print(f"\n🎯 Intensity Filtering:")
                 print(f"   Original points: {len(picked_points)}")
-                print(f"   Median: {target_median:.1f}, Std: {target_std:.1f}")
+                print(f"   Median: {target_median:.4f}, Std: {target_std:.4f}")
                 
                 # ±1σ 범위만 유지
                 valid_mask = (
@@ -440,7 +448,70 @@ class VolumeRenderingMainWindow(QMainWindow):
                 print(f"   Mean: {np.mean(filtered_intensities):.5f}")
                 print(f"   Median: {target_val:.5f}")
                 print(f"   Range: [{min_v:.5f}, {max_v:.5f}]")
-                
+
+                # ⭐⭐⭐ WYSIWYG용 ROI feature extraction ⭐⭐⭐
+                if self.roi_feature_extractor is None:
+                    self.roi_feature_extractor = ROIFeatureExtractor(
+                        volume_range=(self.volume_data.min(), self.volume_data.max())
+                    )
+
+                roi_info = self.roi_feature_extractor.extract(
+                    analyzer_results={
+                        "picked_intensities": filtered_intensities,
+                        "picked_points": filtered_points,
+                    },
+                    tf_nodes=current_tf_nodes,
+                    sam_weights=None,   # 나중에 point_certainty_weights 넣을 수 있음
+                )
+
+                self.current_roi_info = roi_info
+
+                if roi_info is not None:
+                    self.tf_panel.tf_widget.set_highlight_range(roi_info["range_norm"])
+                else:
+                    self.tf_panel.tf_widget.clear_highlight_range()
+
+                # ⭐⭐⭐ TEST: ROI 구간 opacity 살짝 증가시켜보기 ⭐⭐⭐
+                if roi_info is not None:
+                    try:
+                        current_tf_nodes = self.tf_panel.tf_widget.get_nodes()
+
+                        new_tf_nodes, tf_debug = self.wysiwyg_tf_editor.apply_opacity_increase(
+                            tf_nodes=current_tf_nodes,
+                            roi_info=roi_info,
+                            strength=0.12,   # 0.05 ~ 0.2 사이 추천
+                            feather=0.02,
+                            num_nodes=32,
+                        )
+
+                        print("\n[WYSIWYG TF DEBUG]")
+                        print(f"   range_norm          : {tf_debug['range_norm']}")
+                        print(f"   delta               : {tf_debug['delta']:.4f}")
+                        print(f"   feather             : {tf_debug['feather']:.4f}")
+                        print(f"   opacity_before_mean : {tf_debug['opacity_before_mean']:.5f}")
+                        print(f"   opacity_after_mean  : {tf_debug['opacity_after_mean']:.5f}")
+
+                        # TF widget 업데이트
+                        self.tf_panel.tf_widget.set_nodes(new_tf_nodes)
+
+                        # 렌더링 반영
+                        self.rendering_panel.update_transfer_function(new_tf_nodes)
+
+                        print("✅ WYSIWYG opacity increase applied.")
+                    except Exception as e:
+                        print(f"⚠️ WYSIWYG TF edit failed: {e}")
+
+                if roi_info is not None:
+                    print(f"\n[ROI INFO]")
+                    print(f"   center_real : {roi_info['center_real']:.5f}")
+                    print(f"   range_real  : {roi_info['range_real']}")
+                    print(f"   center_norm : {roi_info['center_norm']:.5f}")
+                    print(f"   range_norm  : {roi_info['range_norm']}")
+                    print(f"   raw samples : {roi_info['num_samples_raw']}")
+                    print(f"   filtered    : {roi_info['num_samples_filtered']}")
+                else:
+                    print("⚠️ roi_info is None")
+                                
                 # ⭐⭐⭐ [NEW] Color Reference 계산 (LAB 색공간) ⭐⭐⭐
                 try:
                     import kornia
@@ -498,6 +569,7 @@ class VolumeRenderingMainWindow(QMainWindow):
                     'color_reference': color_reference,
                     'point_certainty_weights': point_certainty_weights,
                     'sam_confidence': sam_confidence,
+                    'roi_info': roi_info,
                 }
                 
                 self.optimization_panel.set_analyzer_result(analyzer_results)
@@ -506,7 +578,7 @@ class VolumeRenderingMainWindow(QMainWindow):
         except Exception as e:
             print(f"Feature Analysis Error: {e}")
 
-    def on_sam_error(self, msg):
+    def on_sam_error(self, msg):                            
         print("SAM error:", msg)
 
     def on_run_text_sam(self, text_prompt):

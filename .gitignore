@@ -45,6 +45,7 @@ __pycache__/
 # Project-specific
 # ------------------------------
 resources/
+ray_profiles_sam_points/
 
 # macOS metadata
 .DS_Store
