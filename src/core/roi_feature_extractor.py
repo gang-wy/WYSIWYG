@@ -105,11 +105,9 @@ class ROIFeatureExtractor:
         )
 
         # TF tent 기반 support range 계산
-        range_real = find_target_range_from_tents(
-            picked_intensities=filtered_intensities,
-            tf_nodes=tf_nodes,
-            volume_range=(self.vol_min, self.vol_max),
-        )
+        low_q = float(np.percentile(filtered_intensities, 20))
+        high_q = float(np.percentile(filtered_intensities, 80))
+        range_real = (low_q, high_q)
 
         center_real = float(np.median(filtered_intensities))
         sigma_real = float(np.std(filtered_intensities))

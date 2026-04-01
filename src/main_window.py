@@ -18,6 +18,7 @@ from src.gui.panel.file_panel import FilePanel
 from src.gui.panel.tf_panel import TransferFunctionPanel
 from src.gui.panel.rendering_panel import RenderingPanel
 from src.gui.panel.optimization_panel import OptimizationPanel
+from src.gui.panel.wysiwyg_panel import WysiwygPanel
 
 from src.core.support_sam import SAMService
 from src.core.feature_analyzer import FeatureAnalyzer
@@ -27,6 +28,11 @@ from src.core.utils.tf_utils import find_target_range_from_tents
 
 from src.core.roi_feature_extractor import ROIFeatureExtractor
 from src.core.wysiwyg_tf_editor import WysiwygTFEditor
+
+from src.gui.wysiwyg.eraser_tool import preview_eraser
+from src.gui.wysiwyg.brightness_tool import preview_brightness
+from src.gui.wysiwyg.color_tool import preview_colorization
+from src.gui.wysiwyg.contrast_tool import preview_contrast
 
 class VolumeRenderingMainWindow(QMainWindow):
     """간결화된 메인 윈도우 - Standard 렌더링 및 SAM 최적화 지원"""
@@ -52,6 +58,8 @@ class VolumeRenderingMainWindow(QMainWindow):
         self.roi_feature_extractor = None
         self.current_roi_info = None
         self.wysiwyg_tf_editor = WysiwygTFEditor()
+        self.base_tf_nodes = None
+        self.preview_tf_nodes = None
 
         self.init_ui()
         self.create_panels()
@@ -59,6 +67,10 @@ class VolumeRenderingMainWindow(QMainWindow):
         
         self.statusBar().showMessage("Ready - Load volume data to start")
         self.tf_panel.reset_background_color()
+
+        self.is_updating_tf_programmatically = False
+        self.preview_active = False
+        self.base_tf_nodes = self._get_current_tf_nodes()
 
     def init_ui(self):
         central_widget = QWidget()
@@ -90,13 +102,24 @@ class VolumeRenderingMainWindow(QMainWindow):
         self.center_widget = QWidget()
         self.center_layout = QVBoxLayout(self.center_widget)
         self.center_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(self.center_widget, stretch=1)
+        main_layout.addWidget(self.center_widget, stretch=2)
 
         # 3. 오른쪽 최적화 패널 영역
+        self.right_outer_container = QWidget()
+        self.right_outer_layout = QHBoxLayout(self.right_outer_container)
+        self.right_outer_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_outer_layout.setSpacing(10)
+
+        # 3-1. 기존 오른쪽 최적화 패널 영역
         self.right_container = QWidget()
         self.right_layout = QVBoxLayout(self.right_container)
         self.right_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(self.right_container, stretch=1)
+
+        # 오른쪽 바깥 레이아웃에 기존 right_container 먼저 추가
+        self.right_outer_layout.addWidget(self.right_container, stretch=3)
+
+        # 최종적으로 main_layout에는 right_container가 아니라 right_outer_container를 추가
+        main_layout.addWidget(self.right_outer_container, stretch=3)
 
     def create_panels(self):
         self.file_panel = FilePanel()
@@ -111,6 +134,30 @@ class VolumeRenderingMainWindow(QMainWindow):
         
         self.optimization_panel = OptimizationPanel()
         self.right_layout.addWidget(self.optimization_panel)
+
+        # WYSIWYG panel을 별도 스크롤 영역에 추가
+        self.wysiwyg_panel = WysiwygPanel(parent=self)
+
+        self.wysiwyg_scroll_area = QScrollArea()
+        self.wysiwyg_scroll_area.setWidgetResizable(True)
+        self.wysiwyg_scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: #2d2d2d;
+            }
+        """)
+
+        self.wysiwyg_scroll_content = QWidget()
+        self.wysiwyg_scroll_layout = QVBoxLayout(self.wysiwyg_scroll_content)
+        self.wysiwyg_scroll_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.wysiwyg_scroll_layout.addWidget(self.wysiwyg_panel)
+        self.wysiwyg_scroll_layout.addStretch(1)
+
+        self.wysiwyg_scroll_area.setWidget(self.wysiwyg_scroll_content)
+
+        # 기존 오른쪽 패널 옆에 추가
+        self.right_outer_layout.addWidget(self.wysiwyg_scroll_area, stretch=3)
         
         self.tf_panel.rendering_panel = self.rendering_panel
 
@@ -149,6 +196,12 @@ class VolumeRenderingMainWindow(QMainWindow):
         # 렌더러의 2D 피킹 시그널 연결
         if hasattr(self.rendering_panel.vtk_renderer, 'point_2d_picked'):
             self.rendering_panel.vtk_renderer.point_2d_picked.connect(self.on_point_2d_picked)
+        
+        # WYSIWYG panel 시그널
+        self.wysiwyg_panel.preview_requested.connect(self.on_wysiwyg_preview_clicked)
+        self.wysiwyg_panel.apply_requested.connect(self.apply_wysiwyg_preview)
+        self.wysiwyg_panel.reset_requested.connect(self.reset_wysiwyg_preview)
+        self.wysiwyg_panel.tool_changed.connect(self.on_wysiwyg_tool_changed)
 
     def on_set_mode_changed(self, enabled):
         """Set 모드 변경 시 데이터 및 화면 강제 초기화"""
@@ -465,41 +518,16 @@ class VolumeRenderingMainWindow(QMainWindow):
                 )
 
                 self.current_roi_info = roi_info
+                self.preview_tf_nodes = None
+                self.preview_active = False
+
+                self.wysiwyg_panel.set_roi_selected(True)
+                self.wysiwyg_panel.set_preview_active(False)
 
                 if roi_info is not None:
                     self.tf_panel.tf_widget.set_highlight_range(roi_info["range_norm"])
                 else:
                     self.tf_panel.tf_widget.clear_highlight_range()
-
-                # ⭐⭐⭐ TEST: ROI 구간 opacity 살짝 증가시켜보기 ⭐⭐⭐
-                if roi_info is not None:
-                    try:
-                        current_tf_nodes = self.tf_panel.tf_widget.get_nodes()
-
-                        new_tf_nodes, tf_debug = self.wysiwyg_tf_editor.apply_opacity_increase(
-                            tf_nodes=current_tf_nodes,
-                            roi_info=roi_info,
-                            strength=0.12,   # 0.05 ~ 0.2 사이 추천
-                            feather=0.02,
-                            num_nodes=32,
-                        )
-
-                        print("\n[WYSIWYG TF DEBUG]")
-                        print(f"   range_norm          : {tf_debug['range_norm']}")
-                        print(f"   delta               : {tf_debug['delta']:.4f}")
-                        print(f"   feather             : {tf_debug['feather']:.4f}")
-                        print(f"   opacity_before_mean : {tf_debug['opacity_before_mean']:.5f}")
-                        print(f"   opacity_after_mean  : {tf_debug['opacity_after_mean']:.5f}")
-
-                        # TF widget 업데이트
-                        self.tf_panel.tf_widget.set_nodes(new_tf_nodes)
-
-                        # 렌더링 반영
-                        self.rendering_panel.update_transfer_function(new_tf_nodes)
-
-                        print("✅ WYSIWYG opacity increase applied.")
-                    except Exception as e:
-                        print(f"⚠️ WYSIWYG TF edit failed: {e}")
 
                 if roi_info is not None:
                     print(f"\n[ROI INFO]")
@@ -573,7 +601,6 @@ class VolumeRenderingMainWindow(QMainWindow):
                 }
                 
                 self.optimization_panel.set_analyzer_result(analyzer_results)
-
 
         except Exception as e:
             print(f"Feature Analysis Error: {e}")
@@ -1006,9 +1033,24 @@ class VolumeRenderingMainWindow(QMainWindow):
         self.tf_panel.set_volume_data(volume_data)
         self.tf_panel.reset_clipping_safe()
         self.current_volume_name = self.file_panel.volume_name
+        
+        self.current_roi_info = None
+        self.preview_tf_nodes = None
+        self.base_tf_nodes = self._get_current_tf_nodes()
+        self.tf_panel.tf_widget.clear_highlight_range()
 
     def on_tf_changed(self, tf_array):
         self.rendering_panel.update_transfer_function(tf_array)
+
+        # preview/apply/reset 등 코드에서 의도적으로 set_nodes() 한 경우
+        # base를 덮어쓰지 않음
+        if self.is_updating_tf_programmatically:
+            return
+
+        # 사용자가 직접 TF를 편집한 경우만 새로운 base로 인정
+        self.preview_tf_nodes = None
+        self.preview_active = False
+        self.base_tf_nodes = self._copy_tf_nodes(tf_array)
     
     def on_background_color_changed(self, color1, color2):
         self.rendering_panel.set_background_color(color1, color2)
@@ -1066,3 +1108,225 @@ class VolumeRenderingMainWindow(QMainWindow):
         
         for p in grid_3d_points:
             self.rendering_panel.add_point_3d(p, "grid")  # "grid" 타입으로 구분
+
+    # ==================================
+    # WYSIWYG 함수
+    # ==================================
+    def on_wysiwyg_preview_clicked(self):
+        tool = self.wysiwyg_panel.get_current_tool()
+        params = self.wysiwyg_panel.get_current_tool_params()
+
+        if tool is None:
+            print("⚠️ No WYSIWYG tool selected.")
+            return
+
+        if tool == "eraser":
+            self.preview_wysiwyg_eraser(**params)
+
+        elif tool == "brightness":
+            self.preview_wysiwyg_brightness(**params)
+
+        elif tool == "contrast":
+            self.preview_wysiwyg_contrast(**params)
+
+        elif tool == "silhouette":
+            self.preview_wysiwyg_silhouette(**params)
+
+        elif tool == "fuzziness":
+            self.preview_wysiwyg_fuzziness(**params)
+
+        elif tool == "colorization":
+            self.preview_wysiwyg_colorization(**params)
+
+        elif tool == "rainbow":
+            self.preview_wysiwyg_rainbow(**params)
+
+        elif tool == "peeling":
+            self.preview_wysiwyg_peeling(**params)
+
+        else:
+            print(f"⚠️ Unknown tool: {tool}")
+
+        self.wysiwyg_panel.set_preview_active(self.preview_active)
+
+    def on_wysiwyg_tool_changed(self, tool_name):
+        self.current_wysiwyg_tool = tool_name
+        print(f"🎯 Selected WYSIWYG tool: {tool_name}")
+
+    def _copy_tf_nodes(self, nodes):
+        if nodes is None:
+            return None
+        return [node[:] for node in nodes]
+
+    def _get_current_tf_nodes(self):
+        return self._copy_tf_nodes(self.tf_panel.tf_widget.get_nodes())
+
+    def _apply_tf_to_view(self, nodes):
+        if nodes is None:
+            return
+        self.is_updating_tf_programmatically = True
+        try:
+            self.tf_panel.tf_widget.set_nodes(nodes)
+            self.rendering_panel.update_transfer_function(nodes)
+        finally:
+            self.is_updating_tf_programmatically = False
+
+    def _ensure_wysiwyg_ready(self):
+        if self.current_roi_info is None:
+            print("⚠️ No ROI selected.")
+            self.statusBar().showMessage("No ROI selected.")
+            return False
+
+        current_nodes = self._get_current_tf_nodes()
+        if current_nodes is None or len(current_nodes) == 0:
+            print("⚠️ TF nodes are empty.")
+            self.statusBar().showMessage("TF nodes are empty.")
+            return False
+
+        return True
+    
+    def _prepare_preview_base_tf(self):
+        if not self.preview_active:
+            self.base_tf_nodes = self._get_current_tf_nodes()
+
+    def _run_wysiwyg_preview(self, tool_runner, **params):
+        """
+        공통 preview 실행기
+        - ROI / TF 준비 확인
+        - preview base TF 준비
+        - 도구 함수 실행
+        - preview 결과 반영
+        """
+        if not self._ensure_wysiwyg_ready():
+            return None
+
+        try:
+            self._prepare_preview_base_tf()
+
+            new_tf_nodes, tf_debug = tool_runner(
+                tf_editor=self.wysiwyg_tf_editor,
+                base_tf_nodes=self.base_tf_nodes,
+                roi_info=self.current_roi_info,
+                **params,
+            )
+
+            self.preview_tf_nodes = self._copy_tf_nodes(new_tf_nodes)
+            self._apply_tf_to_view(self.preview_tf_nodes)
+
+            self.preview_active = True
+            self.wysiwyg_panel.set_preview_active(True)
+
+            return tf_debug
+
+        except Exception as e:
+            print(f"⚠️ WYSIWYG preview failed: {e}")
+            self.statusBar().showMessage(f"WYSIWYG preview failed: {e}")
+            return None
+        
+    def apply_wysiwyg_preview(self):
+        if self.preview_tf_nodes is None:
+            print("⚠️ No preview to apply.")
+            return
+
+        self.base_tf_nodes = self._copy_tf_nodes(self.preview_tf_nodes)
+        self.preview_tf_nodes = None
+        self.preview_active = False
+        self.wysiwyg_panel.set_preview_active(False)
+
+        self._apply_tf_to_view(self.base_tf_nodes)
+
+        print("✅ WYSIWYG preview applied.")
+
+    def reset_wysiwyg_preview(self):
+        if self.base_tf_nodes is None:
+            print("⚠️ No base TF stored.")
+            return
+
+        self.preview_tf_nodes = None
+        self.preview_active = False
+        self.wysiwyg_panel.set_preview_active(False)
+        self._apply_tf_to_view(self.base_tf_nodes)
+
+        print("↩️ WYSIWYG preview reset.")    
+
+    # WYSIWYG Tool
+    def preview_wysiwyg_eraser(self, strength=0.5, feather=0.0, mode="decrease"):
+        tf_debug = self._run_wysiwyg_preview(
+            preview_eraser,
+            strength=strength,
+            feather=feather,
+            mode=mode,
+        )
+
+        if tf_debug is None:
+            return
+
+        print("\n[WYSIWYG ERASER PREVIEW]")
+        print(f"   mode                : {tf_debug['mode']}")
+        print(f"   range_norm          : {tf_debug['range_norm']}")
+        print(f"   feather             : {tf_debug['feather']:.4f}")
+        print(f"   mean_weight         : {tf_debug['mean_weight']:.5f}")
+        print(f"   opacity_before_mean : {tf_debug['opacity_before_mean']:.5f}")
+        print(f"   opacity_after_mean  : {tf_debug['opacity_after_mean']:.5f}")
+
+    def preview_wysiwyg_brightness(self, strength=0.15, feather=0.0, mode="increase"):
+        tf_debug = self._run_wysiwyg_preview(
+            preview_brightness,
+            strength=strength,
+            mode=mode,
+            feather=0.0,   # 현재는 feather 고정
+        )
+
+        if tf_debug is None:
+            return
+
+        print("\n[WYSIWYG BRIGHTNESS PREVIEW]")
+        print(f"   mode         : {tf_debug['mode']}")
+        print(f"   range_norm   : {tf_debug['range_norm']}")
+        print(f"   strength     : {tf_debug['strength']:.4f}")
+        print(f"   affected_cnt : {tf_debug['affected_count']}")
+        print(f"   L_before_mean: {tf_debug['l_before_mean']:.5f}")
+        print(f"   L_after_mean : {tf_debug['l_after_mean']:.5f}")
+
+    def preview_wysiwyg_colorization(self, strength=0.25, feather=0.0, mode="apply", color=None):
+        tf_debug = self._run_wysiwyg_preview(
+            preview_colorization,
+            strength=strength,
+            feather=0.0,
+            mode=mode,
+            color=color,
+        )
+
+        if tf_debug is None:
+            return
+
+        print("\n[WYSIWYG COLORIZATION PREVIEW]")
+        print(f"   mode         : {tf_debug['mode']}")
+        print(f"   range_norm   : {tf_debug['range_norm']}")
+        print(f"   strength     : {tf_debug['strength']:.4f}")
+        print(f"   affected_cnt : {tf_debug['affected_count']}")
+        print(f"   target_rgb   : {tf_debug['target_rgb']}")
+        print(f"   L_before_mean: {tf_debug['l_before_mean']:.5f}")
+        print(f"   L_after_mean : {tf_debug['l_after_mean']:.5f}")
+
+    def preview_wysiwyg_contrast(self, strength=0.2, feather=0.0, mode="increase"):
+        tf_debug = self._run_wysiwyg_preview(
+            preview_contrast,
+            strength=strength,
+            feather=0.0,
+            mode=mode,
+        )
+
+        if tf_debug is None:
+            return
+
+        print("\n[WYSIWYG CONTRAST PREVIEW]")
+        print(f"   mode              : {tf_debug['mode']}")
+        print(f"   range_norm        : {tf_debug['range_norm']}")
+        print(f"   strength          : {tf_debug['strength']:.4f}")
+        print(f"   original_roi_cnt  : {tf_debug['original_roi_count']}")
+        print(f"   affected_cnt      : {tf_debug['affected_count']}")
+        print(f"   expanded          : {tf_debug['expanded']}")
+        print(f"   scale             : {tf_debug['scale']:.4f}")
+        print(f"   L_std_before      : {tf_debug['l_std_before']:.5f}")
+        print(f"   L_std_after       : {tf_debug['l_std_after']:.5f}")

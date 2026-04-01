@@ -4,11 +4,17 @@ import numpy as np
 class WysiwygTFEditor:
     """
     ROI intensity support(range_norm)를 기반으로
-    TF를 국소적으로 수정하는 간단한 편집 엔진.
+    TF를 국소적으로 수정할 때 사용하는 공통 편집 유틸.
 
-    1차 구현:
-    - opacity increase
-    - opacity decrease
+    역할:
+    - TF node 정렬
+    - 특정 위치 node 보간 생성
+    - ROI 내부 node가 없을 때 helper node 삽입
+    - (선택적으로) LUT 샘플링/복원 유틸 제공
+
+    주의:
+    - 실제 도구 로직(eraser / brightness / colorization / contrast ...)은
+      각 전용 tool 파일에 둔다.
     """
 
     def __init__(self, lut_size=256):
@@ -16,9 +22,8 @@ class WysiwygTFEditor:
 
     def _sample_nodes_to_lut(self, tf_nodes):
         """
-        tf_nodes: [[x, r, g, b, a], ...]
-        -> color_lut: (N, 3)
-        -> opacity_lut: (N,)
+        현재 직접 사용하지는 않지만,
+        추후 LUT 기반 연속 편집이 필요할 때 사용 가능.
         """
         if tf_nodes is None or len(tf_nodes) == 0:
             raise ValueError("tf_nodes is empty")
@@ -43,7 +48,8 @@ class WysiwygTFEditor:
 
     def _lut_to_nodes(self, xs, color_lut, opacity_lut, num_nodes=32):
         """
-        수정된 LUT를 다시 node 형태로 다운샘플링
+        현재 직접 사용하지는 않지만,
+        추후 LUT 기반 연속 편집이 필요할 때 사용 가능.
         """
         if len(xs) != len(opacity_lut) or len(xs) != len(color_lut):
             raise ValueError("LUT size mismatch")
@@ -61,84 +67,90 @@ class WysiwygTFEditor:
             ])
         return nodes
 
-    def _make_range_weight(self, xs, low, high, feather=0.03):
+    def _sort_nodes(self, tf_nodes):
+        return sorted(tf_nodes, key=lambda n: n[0])
+
+    def _interpolate_node_at(self, tf_nodes, x):
         """
-        ROI 구간 주변만 0~1 weight를 갖도록 생성.
-        feather는 양끝 부드러운 전이 폭.
+        tf_nodes: [x, r, g, b, a]
+        x 위치의 node 값을 선형보간으로 생성
         """
+        if tf_nodes is None or len(tf_nodes) == 0:
+            raise ValueError("tf_nodes is empty")
+
+        x = float(np.clip(x, 0.0, 1.0))
+        nodes = self._sort_nodes([[float(v) for v in node] for node in tf_nodes])
+
+        if x <= nodes[0][0]:
+            return [x, nodes[0][1], nodes[0][2], nodes[0][3], nodes[0][4]]
+
+        if x >= nodes[-1][0]:
+            return [x, nodes[-1][1], nodes[-1][2], nodes[-1][3], nodes[-1][4]]
+
+        for i in range(len(nodes) - 1):
+            x0, r0, g0, b0, a0 = nodes[i]
+            x1, r1, g1, b1, a1 = nodes[i + 1]
+
+            if x0 <= x <= x1:
+                if abs(x1 - x0) < 1e-8:
+                    return [x, r0, g0, b0, a0]
+
+                t = (x - x0) / (x1 - x0)
+                r = r0 + t * (r1 - r0)
+                g = g0 + t * (g1 - g0)
+                b = b0 + t * (b1 - b0)
+                a = a0 + t * (a1 - a0)
+                return [x, r, g, b, a]
+
+        return [x, nodes[-1][1], nodes[-1][2], nodes[-1][3], nodes[-1][4]]
+
+    def ensure_nodes_in_roi(self, tf_nodes, roi_range, insert_mode="three"):
+        """
+        ROI 안에 기존 TF node가 하나도 없을 때만 helper node 삽입.
+        기본: left / center / right
+
+        Returns:
+            nodes, inserted(bool), inserted_positions(list)
+        """
+        if tf_nodes is None or len(tf_nodes) == 0:
+            raise ValueError("tf_nodes is empty")
+
+        if roi_range is None or len(roi_range) != 2:
+            raise ValueError("roi_range must be (low, high)")
+
+        low, high = roi_range
         low = float(np.clip(low, 0.0, 1.0))
         high = float(np.clip(high, 0.0, 1.0))
 
         if high < low:
             low, high = high, low
 
-        weights = np.zeros_like(xs, dtype=np.float32)
+        nodes = self._sort_nodes([[float(v) for v in node] for node in tf_nodes])
 
-        # 중심 구간
-        inner = (xs >= low) & (xs <= high)
-        weights[inner] = 1.0
+        roi_nodes = [node for node in nodes if low <= node[0] <= high]
+        if len(roi_nodes) > 0:
+            return nodes, False, []
 
-        # 왼쪽 feather
-        left_start = max(0.0, low - feather)
-        left_mask = (xs >= left_start) & (xs < low)
-        if np.any(left_mask) and feather > 1e-8:
-            weights[left_mask] = (xs[left_mask] - left_start) / feather
+        center = 0.5 * (low + high)
 
-        # 오른쪽 feather
-        right_end = min(1.0, high + feather)
-        right_mask = (xs > high) & (xs <= right_end)
-        if np.any(right_mask) and feather > 1e-8:
-            weights[right_mask] = (right_end - xs[right_mask]) / feather
+        if insert_mode == "three":
+            insert_positions = [low, center, high]
+        else:
+            insert_positions = [center]
 
-        return np.clip(weights, 0.0, 1.0)
+        eps = 1e-6
+        existing_x = [node[0] for node in nodes]
+        inserted_positions = []
 
-    def apply_opacity_delta(self, tf_nodes, roi_info, delta=0.15, feather=0.03, num_nodes=32):
-        """
-        ROI support 구간에 opacity delta를 더함.
-        delta > 0 : increase
-        delta < 0 : decrease
-        """
-        if roi_info is None:
-            raise ValueError("roi_info is None")
+        for x in insert_positions:
+            duplicated = any(abs(x - ex) < eps for ex in existing_x)
+            if duplicated:
+                continue
 
-        if "range_norm" not in roi_info:
-            raise ValueError("roi_info does not contain 'range_norm'")
+            new_node = self._interpolate_node_at(nodes, x)
+            nodes.append(new_node)
+            inserted_positions.append(float(x))
+            existing_x.append(float(x))
 
-        low, high = roi_info["range_norm"]
-
-        xs, color_lut, opacity_lut = self._sample_nodes_to_lut(tf_nodes)
-        weights = self._make_range_weight(xs, low, high, feather=feather)
-
-        new_opacity = np.clip(opacity_lut + delta * weights, 0.0, 1.0)
-
-        new_nodes = self._lut_to_nodes(xs, color_lut, new_opacity, num_nodes=num_nodes)
-
-        debug_info = {
-            "range_norm": (float(low), float(high)),
-            "delta": float(delta),
-            "feather": float(feather),
-            "max_weight": float(np.max(weights)),
-            "mean_weight": float(np.mean(weights)),
-            "opacity_before_mean": float(np.mean(opacity_lut)),
-            "opacity_after_mean": float(np.mean(new_opacity)),
-        }
-
-        return new_nodes, debug_info
-
-    def apply_opacity_increase(self, tf_nodes, roi_info, strength=0.15, feather=0.03, num_nodes=32):
-        return self.apply_opacity_delta(
-            tf_nodes=tf_nodes,
-            roi_info=roi_info,
-            delta=abs(strength),
-            feather=feather,
-            num_nodes=num_nodes,
-        )
-
-    def apply_opacity_decrease(self, tf_nodes, roi_info, strength=0.15, feather=0.03, num_nodes=32):
-        return self.apply_opacity_delta(
-            tf_nodes=tf_nodes,
-            roi_info=roi_info,
-            delta=-abs(strength),
-            feather=feather,
-            num_nodes=num_nodes,
-        )
+        nodes = self._sort_nodes(nodes)
+        return nodes, len(inserted_positions) > 0, inserted_positions
