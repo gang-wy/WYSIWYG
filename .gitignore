@@ -52,3 +52,5 @@ ray_profiles_sam_points/
 **/.DS_Store
 ._*
 **/._*
+# Φ 실험 코드(공유 대상 아님)
+phi/

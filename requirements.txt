@@ -1,0 +1,16 @@
+# 앱(main.py) 실행에 필요한 패키지 — 검증한 버전(Python 3.11.9, Windows)
+# torch는 CUDA 버전에 맞춰 따로 설치한다(README 참고).
+PyQt6==6.11.0
+vtk==9.6.2
+numpy==2.4.6
+scipy==1.17.1
+scikit-learn==1.9.0
+nibabel==5.4.2
+matplotlib==3.11.1
+pillow==12.3.0
+transformers==5.14.1
+
+# scripts/ 일부만 사용(선택)
+# onnxruntime==1.31.0              scripts/export_mobile_sam_onnx.py
+# pydicom==3.0.2                   scripts/convert_to_nii.py (DICOM 입력)
+# mobile_sam (git+https://github.com/ChaoningZhang/MobileSAM)   scripts/export_reference.py --sam mobile, export_mobile_sam_onnx.py

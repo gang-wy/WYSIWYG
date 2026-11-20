@@ -1,85 +1,52 @@
+"""TF node list([x, r, g, b, a], x는 0~1 정규화 intensity) 공통 연산."""
 import numpy as np
 
 
 class WysiwygTFEditor:
-    """
-    ROI intensity support(range_norm)를 기반으로
-    TF를 국소적으로 수정할 때 사용하는 공통 편집 유틸.
-
-    역할:
-    - TF node 정렬
-    - 특정 위치 node 보간 생성
-    - ROI 내부 node가 없을 때 helper node 삽입
-    - (선택적으로) LUT 샘플링/복원 유틸 제공
-
-    주의:
-    - 실제 도구 로직(eraser / brightness / colorization / contrast ...)은
-      각 전용 tool 파일에 둔다.
-    """
+    """node 정렬·보간, LUT 샘플링, ROI 보조 node 삽입."""
 
     def __init__(self, lut_size=256):
         self.lut_size = lut_size
 
-    def _sample_nodes_to_lut(self, tf_nodes):
-        """
-        현재 직접 사용하지는 않지만,
-        추후 LUT 기반 연속 편집이 필요할 때 사용 가능.
+    def sample_nodes_to_lut(self, tf_nodes, num_bins=None):
+        """[0, 1]을 num_bins(기본 lut_size)개로 균등 샘플링해 node를 선형 보간한다.
+
+        Returns: (xs (num_bins,), color_lut (num_bins, 3), opacity_lut (num_bins,)) float32
         """
         if tf_nodes is None or len(tf_nodes) == 0:
             raise ValueError("tf_nodes is empty")
 
-        nodes = np.array(tf_nodes, dtype=np.float32)
+        num_bins = num_bins or self.lut_size
+        nodes = np.array(self.sort_nodes(tf_nodes), dtype=np.float32)
         xs_nodes = nodes[:, 0]
         rs_nodes = nodes[:, 1]
         gs_nodes = nodes[:, 2]
         bs_nodes = nodes[:, 3]
         alphas_nodes = nodes[:, 4]
 
-        xs = np.linspace(0.0, 1.0, self.lut_size, dtype=np.float32)
+        xs = np.linspace(0.0, 1.0, num_bins, dtype=np.float32)
 
         r = np.interp(xs, xs_nodes, rs_nodes)
         g = np.interp(xs, xs_nodes, gs_nodes)
         b = np.interp(xs, xs_nodes, bs_nodes)
         a = np.interp(xs, xs_nodes, alphas_nodes)
 
-        color_lut = np.stack([r, g, b], axis=1)
-        opacity_lut = a
+        color_lut = np.stack([r, g, b], axis=1).astype(np.float32)
+        opacity_lut = a.astype(np.float32)
         return xs, color_lut, opacity_lut
 
-    def _lut_to_nodes(self, xs, color_lut, opacity_lut, num_nodes=32):
-        """
-        현재 직접 사용하지는 않지만,
-        추후 LUT 기반 연속 편집이 필요할 때 사용 가능.
-        """
-        if len(xs) != len(opacity_lut) or len(xs) != len(color_lut):
-            raise ValueError("LUT size mismatch")
-
-        indices = np.linspace(0, len(xs) - 1, num_nodes).astype(int)
-
-        nodes = []
-        for i in indices:
-            nodes.append([
-                float(xs[i]),
-                float(color_lut[i, 0]),
-                float(color_lut[i, 1]),
-                float(color_lut[i, 2]),
-                float(opacity_lut[i]),
-            ])
-        return nodes
-
-    def _sort_nodes(self, tf_nodes):
+    @staticmethod
+    def sort_nodes(tf_nodes):
         return sorted(tf_nodes, key=lambda n: n[0])
 
-    def _interpolate_node_at(self, tf_nodes, x):
-        """
-        tf_nodes: [x, r, g, b, a]
-        x 위치의 node 값을 선형보간으로 생성
-        """
+    @staticmethod
+    def interpolate_node_at(tf_nodes, x):
+        """Returns: x(0~1로 clip) 위치의 선형 보간 node [x, r, g, b, a]. 양 끝 밖은 끝 node 값."""
         if tf_nodes is None or len(tf_nodes) == 0:
             raise ValueError("tf_nodes is empty")
 
         x = float(np.clip(x, 0.0, 1.0))
-        nodes = self._sort_nodes([[float(v) for v in node] for node in tf_nodes])
+        nodes = WysiwygTFEditor.sort_nodes([[float(v) for v in node] for node in tf_nodes])
 
         if x <= nodes[0][0]:
             return [x, nodes[0][1], nodes[0][2], nodes[0][3], nodes[0][4]]
@@ -105,12 +72,9 @@ class WysiwygTFEditor:
         return [x, nodes[-1][1], nodes[-1][2], nodes[-1][3], nodes[-1][4]]
 
     def ensure_nodes_in_roi(self, tf_nodes, roi_range, insert_mode="three"):
-        """
-        ROI 안에 기존 TF node가 하나도 없을 때만 helper node 삽입.
-        기본: left / center / right
+        """roi_range 안에 node가 하나도 없을 때만 보간 node를 넣는다(insert_mode="three"면 low/center/high, 아니면 center).
 
-        Returns:
-            nodes, inserted(bool), inserted_positions(list)
+        Returns: (정렬된 nodes, 삽입 여부, 삽입한 x 목록)
         """
         if tf_nodes is None or len(tf_nodes) == 0:
             raise ValueError("tf_nodes is empty")
@@ -125,7 +89,7 @@ class WysiwygTFEditor:
         if high < low:
             low, high = high, low
 
-        nodes = self._sort_nodes([[float(v) for v in node] for node in tf_nodes])
+        nodes = self.sort_nodes([[float(v) for v in node] for node in tf_nodes])
 
         roi_nodes = [node for node in nodes if low <= node[0] <= high]
         if len(roi_nodes) > 0:
@@ -147,10 +111,10 @@ class WysiwygTFEditor:
             if duplicated:
                 continue
 
-            new_node = self._interpolate_node_at(nodes, x)
+            new_node = self.interpolate_node_at(nodes, x)
             nodes.append(new_node)
             inserted_positions.append(float(x))
             existing_x.append(float(x))
 
-        nodes = self._sort_nodes(nodes)
+        nodes = self.sort_nodes(nodes)
         return nodes, len(inserted_positions) > 0, inserted_positions

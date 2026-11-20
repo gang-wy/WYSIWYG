@@ -1,41 +1,33 @@
+"""앱 진입점: 실행 환경 변수 설정 후 Fusion 다크 테마로 메인 윈도우를 띄운다."""
 import sys
 import os
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 
-# ✅ Windows 호환성 개선
+# Windows는 forkserver 미지원
 if sys.platform == "win32":
-    # Windows는 forkserver를 지원하지 않음
     os.environ["JOBLIB_START_METHOD"] = "loky"
 else:
     os.environ["JOBLIB_START_METHOD"] = "forkserver"
 
-# 기존 VTK 설정
+# VTK 렌더링 백엔드 (OSMesa 소프트웨어 렌더링)
 os.environ['LIBGL_ALWAYS_SOFTWARE'] = '1'
 os.environ['MESA_GL_VERSION_OVERRIDE'] = '3.2'
 os.environ['VTK_USE_OSMESA'] = '1'
 
 def main():
+    """QApplication과 메인 윈도우를 만들고 이벤트 루프를 돈다. Returns: 종료 코드"""
     clear_python_cache()
-    
-    # ⭐ SAM3 모델은 SAMWrapper에서 자동으로 캐시 확인 및 다운로드 처리
-    # 별도의 check_and_download_model() 함수 호출 불필요
-    
-    """메인 함수"""
     os.environ['TORCH_CUDA_ARCH_LIST'] = '8.6'
-    
-    # PyQt6 애플리케이션 생성
+
     from PyQt6.QtWidgets import QApplication
-    from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QPalette, QColor
-    
+
     app = QApplication(sys.argv)
-    
-    # 스타일 설정
     app.setStyle('Fusion')
-    
-    # 다크 테마 적용
+
+    # 다크 테마
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
     palette.setColor(QPalette.ColorRole.WindowText, QColor(255, 255, 255))
@@ -51,27 +43,24 @@ def main():
     palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
     palette.setColor(QPalette.ColorRole.HighlightedText, QColor(0, 0, 0))
     app.setPalette(palette)
-    
-    # ⭐ 메인 윈도우 생성 - 절대 import 경로 사용
+
     from src.main_window import VolumeRenderingMainWindow
-    
     window = VolumeRenderingMainWindow()
     window.show()
-    
+
     try:
         exit_code = app.exec()
     except KeyboardInterrupt:
         print("\n⚠️ Keyboard interrupt detected")
         exit_code = 0
     finally:
-        # 강제 가비지 컬렉션
         import gc
         gc.collect()
-    
+
     return exit_code
 
 def clear_python_cache():
-    """Python 캐시 파일들 정리"""
+    """현재 폴더 아래의 __pycache__ 폴더와 .pyc 파일을 지운다."""
     import shutil
     import glob
     

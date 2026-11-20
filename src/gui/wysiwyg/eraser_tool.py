@@ -1,26 +1,13 @@
-def _clamp(value, min_value=0.0, max_value=1.0):
-    return max(min_value, min(max_value, value))
-
-
-def _compute_binary_weight(x, range_min, range_max):
-    return 1.0 if range_min <= x <= range_max else 0.0
+from src.gui.wysiwyg.color_math import clamp, compute_binary_weight, require_roi_range
 
 
 def preview_eraser(tf_editor, base_tf_nodes, roi_info, strength=0.5, feather=0.1, mode="decrease"):
+    """ROI intensity 구간(range_norm) 안 node의 opacity를 높이거나(increase) 낮춘다(decrease).
+
+    구간 안에 node가 없으면 보조 node 3개를 먼저 넣는다. feather는 사용하지 않는다(구간 안 = 가중치 1).
+    Returns: (new_nodes, debug_info)
     """
-    ROI 내부 TF node의 alpha를 증가/감소시킨다.
-
-    보강:
-    - ROI 안에 node가 없으면 helper node(left/center/right) 삽입
-    - feather는 현재 실사용 0 고정이므로 binary selection 중심
-    """
-    if base_tf_nodes is None or len(base_tf_nodes) == 0:
-        raise ValueError("base_tf_nodes is empty.")
-
-    if roi_info is None or "range_norm" not in roi_info:
-        raise ValueError("roi_info['range_norm'] is required.")
-
-    range_min, range_max = roi_info["range_norm"]
+    range_min, range_max = require_roi_range(base_tf_nodes, roi_info)
     normalized_mode = str(mode).strip().lower()
 
     if normalized_mode not in ("increase", "decrease"):
@@ -41,9 +28,7 @@ def preview_eraser(tf_editor, base_tf_nodes, roi_info, strength=0.5, feather=0.1
 
     for node in new_nodes:
         x, r, g, b, a = node
-
-        # 현재 feather는 안 쓰는 방향이므로 binary range selection
-        weight = _compute_binary_weight(x, range_min, range_max)
+        weight = compute_binary_weight(x, range_min, range_max)
         weights.append(weight)
 
         before_opacities.append(float(a))
@@ -56,7 +41,7 @@ def preview_eraser(tf_editor, base_tf_nodes, roi_info, strength=0.5, feather=0.1
             else:
                 new_a = a * (1.0 - strength * weight)
 
-            node[4] = _clamp(new_a)
+            node[4] = clamp(new_a)
 
         after_opacities.append(float(node[4]))
 
